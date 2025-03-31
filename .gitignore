@@ -1,0 +1,11 @@
+# Virtual environments
+venv/
+
+# IDE specific files
+.idea/
+.vscode/
+.DS_Store
+__MACOSX/
+
+# Log files
+*.log

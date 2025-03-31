@@ -1,0 +1,7 @@
+# Install pyicloud from local path:
+# pip install lib/pyicloud-1.0.0.dev1-py3-none-any.whl
+pyicloud==1.0.0.dev1
+pillow>=9.0.0
+tqdm>=4.64.0
+python-dateutil>=2.8.2
+keyring>=23.0.0 
