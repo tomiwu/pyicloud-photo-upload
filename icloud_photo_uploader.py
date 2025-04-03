@@ -11,6 +11,8 @@ import sys
 import argparse
 import getpass
 import logging
+import tempfile
+import shutil
 from datetime import datetime
 import time
 from pathlib import Path
@@ -21,11 +23,11 @@ from tqdm import tqdm
 from pyicloud import PyiCloudService
 
 # Default log file paths
-DEFAULT_FAILED_UPLOADS_LOG = 'failed_uploads.log'
+DEFAULT_TODO_LOG = 'todo_uploads.log'
 DEFAULT_GENERAL_LOG = 'icloud_upload.log'
 
 # Global variables for log files - will be updated by CLI args if provided
-FAILED_UPLOADS_LOG = DEFAULT_FAILED_UPLOADS_LOG
+TODO_LOG = DEFAULT_TODO_LOG
 GENERAL_LOG = DEFAULT_GENERAL_LOG
 
 # Configure logging
@@ -39,13 +41,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Create a separate logger for failed uploads
-failed_logger = logging.getLogger('failed_uploads')
-failed_logger.setLevel(logging.INFO)
-failed_handler = logging.FileHandler(FAILED_UPLOADS_LOG)
-failed_handler.setFormatter(logging.Formatter('%(message)s'))
-failed_logger.addHandler(failed_handler)
-failed_logger.propagate = False
+# Create a separate logger for todo uploads
+todo_logger = logging.getLogger('todo_uploads')
+todo_logger.setLevel(logging.INFO)
+todo_handler = logging.FileHandler(TODO_LOG)
+todo_handler.setFormatter(logging.Formatter('%(message)s'))
+todo_logger.addHandler(todo_handler)
+todo_logger.propagate = False
 
 # File extensions for photos - now only JPEGs
 PHOTO_EXTENSIONS = {'.jpg', '.jpeg'}
@@ -103,8 +105,57 @@ def authenticate_icloud(username, password=None):
     
     return api
 
+def remove_from_todo(photo_path):
+    """Remove a successfully uploaded photo path from the todo log."""
+    try:
+        # Create a temporary file
+        with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp_file:
+            with open(TODO_LOG, 'r') as f:
+                for line in f:
+                    if line.strip() != str(photo_path):
+                        temp_file.write(line)
+        
+        # Replace the original file with the temporary file
+        shutil.move(temp_file.name, TODO_LOG)
+    except Exception as e:
+        logger.error(f"Error removing {photo_path} from todo log: {e}")
+
+def add_to_todo(photo_paths):
+    """Add photo paths to the todo log if they're not already there."""
+    try:
+        # Read existing entries
+        existing_paths = set()
+        if os.path.exists(TODO_LOG):
+            with open(TODO_LOG, 'r') as f:
+                existing_paths = {line.strip() for line in f}
+        
+        # Add new paths
+        with open(TODO_LOG, 'a') as f:
+            for path in photo_paths:
+                if str(path) not in existing_paths:
+                    f.write(f"{path}\n")
+    except Exception as e:
+        logger.error(f"Error adding paths to todo log: {e}")
+
+def read_todo_list():
+    """Read the todo log file and return a list of photo paths."""
+    try:
+        if not os.path.exists(TODO_LOG):
+            logger.error(f"Todo log file not found: {TODO_LOG}")
+            return []
+            
+        with open(TODO_LOG, 'r') as f:
+            todo_paths = [Path(line.strip()) for line in f.readlines()]
+            
+        # Remove duplicates while preserving order
+        todo_paths = list(dict.fromkeys(todo_paths))
+        return todo_paths
+    except Exception as e:
+        logger.error(f"Error reading todo log: {e}")
+        return []
+
 def upload_photo(api, photo_path, album_name=None):
-    """Upload a single photo to iCloud using upload_file method."""
+    """Upload a single photo to iCloud and remove from todo list if successful."""
     try:
         # Upload to the specified album or default to Camera Roll
         if album_name:
@@ -123,42 +174,17 @@ def upload_photo(api, photo_path, album_name=None):
                 albums[album_name].add(photo_path)
             else:
                 logger.error(f"Could not find or create album: {album_name}")
-                failed_logger.info(str(photo_path))
                 return False
         else:
             # Upload to Camera Roll
             api.photos.upload_file(photo_path)
         
+        # If upload was successful, remove from todo list
+        remove_from_todo(photo_path)
         return True
     except Exception as e:
         logger.error(f"Error uploading {photo_path}: {e}")
-        failed_logger.info(str(photo_path))
         return False
-
-def read_failed_uploads():
-    """Read the failed uploads log file and return a list of photo paths."""
-    try:
-        if not os.path.exists(FAILED_UPLOADS_LOG):
-            logger.error(f"Failed uploads log file not found: {FAILED_UPLOADS_LOG}")
-            return []
-            
-        with open(FAILED_UPLOADS_LOG, 'r') as f:
-            failed_paths = [Path(line.strip()) for line in f.readlines()]
-            
-        # Remove duplicates while preserving order
-        failed_paths = list(dict.fromkeys(failed_paths))
-        return failed_paths
-    except Exception as e:
-        logger.error(f"Error reading failed uploads log: {e}")
-        return []
-
-def clear_failed_uploads_log():
-    """Clear the contents of the failed uploads log file."""
-    try:
-        with open(FAILED_UPLOADS_LOG, 'w') as f:
-            pass  # Just truncate the file
-    except Exception as e:
-        logger.error(f"Error clearing failed uploads log: {e}")
 
 def main():
     """Main function to parse arguments and run the uploader."""
@@ -167,23 +193,23 @@ def main():
     # Create a mutually exclusive group for directory and retry mode
     mode_group = parser.add_mutually_exclusive_group(required=True)
     mode_group.add_argument('--directory', '-d', help='Directory containing photos to upload (will be scanned recursively)')
-    mode_group.add_argument('--retry', '-r', action='store_true', help='Retry failed uploads from the failed uploads log')
+    mode_group.add_argument('--retry', '-r', action='store_true', help='Retry uploads from the todo log')
     
     parser.add_argument('--username', '-u', required=True, help='iCloud username/email')
     parser.add_argument('--password', '-p', help='iCloud password (if not provided, will prompt)')
     parser.add_argument('--album', '-a', help='iCloud album to upload to (if not specified, uploads to Camera Roll)')
     parser.add_argument('--threads', '-t', type=int, default=5, help='Number of upload threads (default: 5)')
     parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose logging')
-    parser.add_argument('--failed-log', '-f', default=DEFAULT_FAILED_UPLOADS_LOG, 
-                       help=f'Path to the failed uploads log file (default: {DEFAULT_FAILED_UPLOADS_LOG})')
+    parser.add_argument('--todo-log', '-f', default=DEFAULT_TODO_LOG, 
+                       help=f'Path to the todo uploads log file (default: {DEFAULT_TODO_LOG})')
     parser.add_argument('--general-log', '-g', default=DEFAULT_GENERAL_LOG,
                        help=f'Path to the general log file (default: {DEFAULT_GENERAL_LOG})')
     
     args = parser.parse_args()
     
     # Update global log file paths
-    global FAILED_UPLOADS_LOG, GENERAL_LOG
-    FAILED_UPLOADS_LOG = args.failed_log
+    global TODO_LOG, GENERAL_LOG
+    TODO_LOG = args.todo_log
     GENERAL_LOG = args.general_log
     
     # Reconfigure logging with new file paths
@@ -192,28 +218,31 @@ def main():
     logger.addHandler(logging.StreamHandler())
     logger.addHandler(logging.FileHandler(GENERAL_LOG))
     
-    # Reconfigure failed uploads logger
-    for handler in failed_logger.handlers[:]:
-        failed_logger.removeHandler(handler)
-    failed_handler = logging.FileHandler(FAILED_UPLOADS_LOG)
-    failed_handler.setFormatter(logging.Formatter('%(message)s'))
-    failed_logger.addHandler(failed_handler)
+    # Reconfigure todo uploads logger
+    for handler in todo_logger.handlers[:]:
+        todo_logger.removeHandler(handler)
+    todo_handler = logging.FileHandler(TODO_LOG)
+    todo_handler.setFormatter(logging.Formatter('%(message)s'))
+    todo_logger.addHandler(todo_handler)
     
     if args.verbose:
         logger.setLevel(logging.DEBUG)
     
     # Get photo list
     if args.retry:
-        photos = read_failed_uploads()
+        photos = read_todo_list()
         if not photos:
-            logger.error(f"No failed uploads found to retry in {FAILED_UPLOADS_LOG}. Exiting.")
+            logger.error(f"No pending uploads found in {TODO_LOG}. Exiting.")
             return 1
-        logger.info(f"Found {len(photos)} failed uploads to retry")
+        logger.info(f"Found {len(photos)} pending uploads to process")
     else:
         photos = scan_directory(args.directory)
         if not photos:
             logger.error("No JPEG photos found to upload. Exiting.")
             return 1
+        # Add new photos to todo list
+        add_to_todo(photos)
+        logger.info(f"Added {len(photos)} photos to todo list")
     
     # Authenticate with iCloud
     api = authenticate_icloud(
@@ -255,13 +284,12 @@ def main():
                     pbar.update(1)
     
     # Final report
+    remaining = len(read_todo_list())
     logger.info(f"Upload complete: {successful} successful, {failed} failed")
-    if failed > 0:
-        logger.info(f"Failed uploads have been logged to {FAILED_UPLOADS_LOG}")
-    elif args.retry and successful > 0:
-        # Clear the failed uploads log if all retries were successful
-        clear_failed_uploads_log()
-        logger.info("All retries successful - cleared failed uploads log")
+    if remaining > 0:
+        logger.info(f"{remaining} photos remaining in todo list: {TODO_LOG}")
+    else:
+        logger.info("All photos have been uploaded successfully!")
     
     return 0 if failed == 0 else 1
 
