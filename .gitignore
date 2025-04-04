@@ -9,3 +9,6 @@ __MACOSX/
 
 # Log files
 *.log
+
+# Database files
+*.db

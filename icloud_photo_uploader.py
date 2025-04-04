@@ -11,8 +11,7 @@ import sys
 import argparse
 import getpass
 import logging
-import tempfile
-import shutil
+import sqlite3
 from datetime import datetime
 import time
 from pathlib import Path
@@ -23,11 +22,11 @@ from tqdm import tqdm
 from pyicloud import PyiCloudService
 
 # Default log file paths
-DEFAULT_TODO_LOG = 'todo_uploads.log'
+DEFAULT_TODO_DB = 'todo_uploads.db'
 DEFAULT_GENERAL_LOG = 'icloud_upload.log'
 
 # Global variables for log files - will be updated by CLI args if provided
-TODO_LOG = DEFAULT_TODO_LOG
+TODO_DB = DEFAULT_TODO_DB
 GENERAL_LOG = DEFAULT_GENERAL_LOG
 
 # Configure logging
@@ -41,13 +40,79 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Create a separate logger for todo uploads
-todo_logger = logging.getLogger('todo_uploads')
-todo_logger.setLevel(logging.INFO)
-todo_handler = logging.FileHandler(TODO_LOG)
-todo_handler.setFormatter(logging.Formatter('%(message)s'))
-todo_logger.addHandler(todo_handler)
-todo_logger.propagate = False
+def init_database():
+    """Initialize SQLite database with necessary tables."""
+    try:
+        with sqlite3.connect(TODO_DB) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS todo_photos (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    photo_path TEXT UNIQUE NOT NULL,
+                    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    status TEXT DEFAULT 'pending'
+                )
+            ''')
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Error initializing database: {e}")
+        sys.exit(1)
+
+def remove_from_todo(photo_path):
+    """Remove a successfully uploaded photo path from the todo database."""
+    try:
+        with sqlite3.connect(TODO_DB) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE todo_photos SET status = 'completed' WHERE photo_path = ?",
+                (str(photo_path),)
+            )
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Error removing {photo_path} from todo database: {e}")
+
+def add_to_todo(photo_paths):
+    """Add photo paths to the todo database if they're not already there."""
+    try:
+        with sqlite3.connect(TODO_DB) as conn:
+            cursor = conn.cursor()
+            # Use INSERT OR IGNORE to skip duplicates
+            cursor.executemany(
+                "INSERT OR IGNORE INTO todo_photos (photo_path) VALUES (?)",
+                [(str(path),) for path in photo_paths]
+            )
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Error adding paths to todo database: {e}")
+
+def read_todo_list():
+    """Read pending photos from the todo database."""
+    try:
+        with sqlite3.connect(TODO_DB) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT photo_path FROM todo_photos WHERE status = 'pending'")
+            todo_paths = [Path(row[0]) for row in cursor.fetchall()]
+            return todo_paths
+    except Exception as e:
+        logger.error(f"Error reading todo database: {e}")
+        return []
+
+def get_todo_stats():
+    """Get statistics about todo items."""
+    try:
+        with sqlite3.connect(TODO_DB) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT 
+                    status, 
+                    COUNT(*) as count 
+                FROM todo_photos 
+                GROUP BY status
+            """)
+            return dict(cursor.fetchall())
+    except Exception as e:
+        logger.error(f"Error getting todo stats: {e}")
+        return {}
 
 # File extensions for photos - now only JPEGs
 PHOTO_EXTENSIONS = {'.jpg', '.jpeg'}
@@ -105,55 +170,6 @@ def authenticate_icloud(username, password=None):
     
     return api
 
-def remove_from_todo(photo_path):
-    """Remove a successfully uploaded photo path from the todo log."""
-    try:
-        # Create a temporary file
-        with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp_file:
-            with open(TODO_LOG, 'r') as f:
-                for line in f:
-                    if line.strip() != str(photo_path):
-                        temp_file.write(line)
-        
-        # Replace the original file with the temporary file
-        shutil.move(temp_file.name, TODO_LOG)
-    except Exception as e:
-        logger.error(f"Error removing {photo_path} from todo log: {e}")
-
-def add_to_todo(photo_paths):
-    """Add photo paths to the todo log if they're not already there."""
-    try:
-        # Read existing entries
-        existing_paths = set()
-        if os.path.exists(TODO_LOG):
-            with open(TODO_LOG, 'r') as f:
-                existing_paths = {line.strip() for line in f}
-        
-        # Add new paths
-        with open(TODO_LOG, 'a') as f:
-            for path in photo_paths:
-                if str(path) not in existing_paths:
-                    f.write(f"{path}\n")
-    except Exception as e:
-        logger.error(f"Error adding paths to todo log: {e}")
-
-def read_todo_list():
-    """Read the todo log file and return a list of photo paths."""
-    try:
-        if not os.path.exists(TODO_LOG):
-            logger.error(f"Todo log file not found: {TODO_LOG}")
-            return []
-            
-        with open(TODO_LOG, 'r') as f:
-            todo_paths = [Path(line.strip()) for line in f.readlines()]
-            
-        # Remove duplicates while preserving order
-        todo_paths = list(dict.fromkeys(todo_paths))
-        return todo_paths
-    except Exception as e:
-        logger.error(f"Error reading todo log: {e}")
-        return []
-
 def upload_photo(api, photo_path, album_name=None):
     """Upload a single photo to iCloud and remove from todo list if successful."""
     try:
@@ -193,24 +209,28 @@ def main():
     # Create a mutually exclusive group for directory and retry mode
     mode_group = parser.add_mutually_exclusive_group(required=True)
     mode_group.add_argument('--directory', '-d', help='Directory containing photos to upload (will be scanned recursively)')
-    mode_group.add_argument('--retry', '-r', action='store_true', help='Retry uploads from the todo log')
+    mode_group.add_argument('--retry', '-r', action='store_true', help='Retry uploads from the todo database')
+    mode_group.add_argument('--stats', '-s', action='store_true', help='Show upload statistics and exit')
     
-    parser.add_argument('--username', '-u', required=True, help='iCloud username/email')
+    parser.add_argument('--username', '-u', help='iCloud username/email')
     parser.add_argument('--password', '-p', help='iCloud password (if not provided, will prompt)')
     parser.add_argument('--album', '-a', help='iCloud album to upload to (if not specified, uploads to Camera Roll)')
     parser.add_argument('--threads', '-t', type=int, default=5, help='Number of upload threads (default: 5)')
     parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose logging')
-    parser.add_argument('--todo-log', '-f', default=DEFAULT_TODO_LOG, 
-                       help=f'Path to the todo uploads log file (default: {DEFAULT_TODO_LOG})')
+    parser.add_argument('--todo-db', '-f', default=DEFAULT_TODO_DB, 
+                       help=f'Path to the todo database file (default: {DEFAULT_TODO_DB})')
     parser.add_argument('--general-log', '-g', default=DEFAULT_GENERAL_LOG,
                        help=f'Path to the general log file (default: {DEFAULT_GENERAL_LOG})')
     
     args = parser.parse_args()
     
-    # Update global log file paths
-    global TODO_LOG, GENERAL_LOG
-    TODO_LOG = args.todo_log
+    # Update global paths
+    global TODO_DB, GENERAL_LOG
+    TODO_DB = args.todo_db
     GENERAL_LOG = args.general_log
+    
+    # Initialize the database
+    init_database()
     
     # Reconfigure logging with new file paths
     for handler in logger.handlers[:]:
@@ -218,21 +238,27 @@ def main():
     logger.addHandler(logging.StreamHandler())
     logger.addHandler(logging.FileHandler(GENERAL_LOG))
     
-    # Reconfigure todo uploads logger
-    for handler in todo_logger.handlers[:]:
-        todo_logger.removeHandler(handler)
-    todo_handler = logging.FileHandler(TODO_LOG)
-    todo_handler.setFormatter(logging.Formatter('%(message)s'))
-    todo_logger.addHandler(todo_handler)
-    
     if args.verbose:
         logger.setLevel(logging.DEBUG)
+    
+    # Show stats if requested
+    if args.stats:
+        stats = get_todo_stats()
+        logger.info("Upload Statistics:")
+        logger.info(f"Pending uploads: {stats.get('pending', 0)}")
+        logger.info(f"Completed uploads: {stats.get('completed', 0)}")
+        return 0
+    
+    # Username is required for upload operations
+    if not args.username:
+        logger.error("Username is required for upload operations")
+        return 1
     
     # Get photo list
     if args.retry:
         photos = read_todo_list()
         if not photos:
-            logger.error(f"No pending uploads found in {TODO_LOG}. Exiting.")
+            logger.error(f"No pending uploads found in database. Exiting.")
             return 1
         logger.info(f"Found {len(photos)} pending uploads to process")
     else:
@@ -284,12 +310,14 @@ def main():
                     pbar.update(1)
     
     # Final report
-    remaining = len(read_todo_list())
+    stats = get_todo_stats()
     logger.info(f"Upload complete: {successful} successful, {failed} failed")
-    if remaining > 0:
-        logger.info(f"{remaining} photos remaining in todo list: {TODO_LOG}")
+    if stats.get('pending', 0) > 0:
+        logger.info(f"{stats['pending']} photos remaining to upload")
+        logger.info(f"Run with --retry to attempt uploading remaining photos")
     else:
         logger.info("All photos have been uploaded successfully!")
+        logger.info(f"Total completed uploads: {stats.get('completed', 0)}")
     
     return 0 if failed == 0 else 1
 
