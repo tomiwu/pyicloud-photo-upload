@@ -114,6 +114,19 @@ def get_todo_stats():
         logger.error(f"Error getting todo stats: {e}")
         return {}
 
+def clear_todo_database():
+    """Mark all entries in the todo database as completed."""
+    try:
+        with sqlite3.connect(TODO_DB) as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE todo_photos SET status = 'completed'")
+            affected_rows = cursor.rowcount
+            conn.commit()
+            return affected_rows
+    except Exception as e:
+        logger.error(f"Error clearing todo database: {e}")
+        return 0
+
 # File extensions for photos - now only JPEGs
 PHOTO_EXTENSIONS = {'.jpg', '.jpeg'}
 
@@ -211,6 +224,7 @@ def main():
     mode_group.add_argument('--directory', '-d', help='Directory containing photos to upload (will be scanned recursively)')
     mode_group.add_argument('--retry', '-r', action='store_true', help='Retry uploads from the todo database')
     mode_group.add_argument('--stats', '-s', action='store_true', help='Show upload statistics and exit')
+    mode_group.add_argument('--clear', '-c', action='store_true', help='Mark all pending uploads as completed')
     
     parser.add_argument('--username', '-u', help='iCloud username/email')
     parser.add_argument('--password', '-p', help='iCloud password (if not provided, will prompt)')
@@ -247,6 +261,12 @@ def main():
         logger.info("Upload Statistics:")
         logger.info(f"Pending uploads: {stats.get('pending', 0)}")
         logger.info(f"Completed uploads: {stats.get('completed', 0)}")
+        return 0
+    
+    # Clear database if requested
+    if args.clear:
+        cleared_count = clear_todo_database()
+        logger.info(f"Marked {cleared_count} pending uploads as completed")
         return 0
     
     # Username is required for upload operations
