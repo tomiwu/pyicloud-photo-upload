@@ -127,6 +127,29 @@ def clear_todo_database():
         logger.error(f"Error clearing todo database: {e}")
         return 0
 
+def list_pending_photos():
+    """List all pending photos from the todo database."""
+    try:
+        with sqlite3.connect(TODO_DB) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT photo_path, added_at 
+                FROM todo_photos 
+                WHERE status = 'pending'
+                ORDER BY added_at
+            """)
+            pending_photos = cursor.fetchall()
+            
+            if not pending_photos:
+                logger.info("No pending photos found in the database")
+                return
+            
+            logger.info(f"Found {len(pending_photos)} pending photos:")
+            for photo_path, added_at in pending_photos:
+                logger.info(f"{added_at} - {photo_path}")
+    except Exception as e:
+        logger.error(f"Error listing pending photos: {e}")
+
 # File extensions for photos - now only JPEGs
 PHOTO_EXTENSIONS = {'.jpg', '.jpeg'}
 
@@ -206,6 +229,7 @@ def main():
     mode_group.add_argument('--retry', '-r', action='store_true', help='Retry uploads from the todo database')
     mode_group.add_argument('--stats', '-s', action='store_true', help='Show upload statistics and exit')
     mode_group.add_argument('--clear', '-c', action='store_true', help='Mark all pending uploads as completed')
+    mode_group.add_argument('--list', '-l', action='store_true', help='List all pending photos in the todo database')
     
     parser.add_argument('--username', '-u', help='iCloud username/email')
     parser.add_argument('--password', '-p', help='iCloud password (if not provided, will prompt)')
@@ -241,6 +265,11 @@ def main():
         logger.info("Upload Statistics:")
         logger.info(f"Pending uploads: {stats.get('pending', 0)}")
         logger.info(f"Completed uploads: {stats.get('completed', 0)}")
+        return 0
+    
+    # List pending photos if requested
+    if args.list:
+        list_pending_photos()
         return 0
     
     # Clear database if requested
