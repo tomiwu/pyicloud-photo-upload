@@ -183,30 +183,11 @@ def authenticate_icloud(username, password=None):
     
     return api
 
-def upload_photo(api, photo_path, album_name=None):
-    """Upload a single photo to iCloud and remove from todo list if successful."""
+def upload_photo(api, photo_path):
+    """Upload a single photo to iCloud Camera Roll and remove from todo list if successful."""
     try:
-        # Upload to the specified album or default to Camera Roll
-        if album_name:
-            # Check if album exists, create if it doesn't
-            albums = {album.title: album for album in api.photos.albums}
-            if album_name not in albums:
-                logger.info(f"Creating new album: {album_name}")
-                api.photos.create_album(album_name)
-                # Refresh albums list
-                time.sleep(2)  # Give iCloud time to process
-                albums = {album.title: album for album in api.photos.albums}
-            
-            # Upload to the specified album
-            if album_name in albums:
-                # Upload to album using the path
-                albums[album_name].add(photo_path)
-            else:
-                logger.error(f"Could not find or create album: {album_name}")
-                return False
-        else:
-            # Upload to Camera Roll
-            api.photos.upload_file(photo_path)
+        # Upload to Camera Roll
+        api.photos.upload_file(photo_path)
         
         # If upload was successful, remove from todo list
         remove_from_todo(photo_path)
@@ -228,7 +209,6 @@ def main():
     
     parser.add_argument('--username', '-u', help='iCloud username/email')
     parser.add_argument('--password', '-p', help='iCloud password (if not provided, will prompt)')
-    parser.add_argument('--album', '-a', help='iCloud album to upload to (if not specified, uploads to Camera Roll)')
     parser.add_argument('--threads', '-t', type=int, default=5, help='Number of upload threads (default: 5)')
     parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose logging')
     parser.add_argument('--todo-db', '-f', default=DEFAULT_TODO_DB, 
@@ -300,8 +280,7 @@ def main():
         return 1
     
     # Upload photos
-    logger.info(f"Starting upload of {len(photos)} JPEG photos" +
-                (f" to album '{args.album}'" if args.album else ""))
+    logger.info(f"Starting upload of {len(photos)} JPEG photos to Camera Roll")
     
     successful = 0
     failed = 0
@@ -309,7 +288,7 @@ def main():
     with ThreadPoolExecutor(max_workers=args.threads) as executor:
         # Create upload tasks
         upload_tasks = {
-            executor.submit(upload_photo, api, photo, args.album): photo
+            executor.submit(upload_photo, api, photo): photo
             for photo in photos
         }
         
